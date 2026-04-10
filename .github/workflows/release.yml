@@ -1,0 +1,107 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --target ${{ matrix.target }}
+      - run: |
+          cd target/${{ matrix.target }}/release
+          tar czf seance-${{ matrix.target }}.tar.gz seance
+          shasum -a 256 seance-${{ matrix.target }}.tar.gz > seance-${{ matrix.target }}.tar.gz.sha256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: seance-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/seance-${{ matrix.target }}.tar.gz
+            target/${{ matrix.target }}/release/seance-${{ matrix.target }}.tar.gz.sha256
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: "*.tar.gz*"
+          generate_release_notes: true
+
+  update-tap:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: actions/checkout@v4
+        with:
+          repository: chilang/homebrew-tap
+          token: ${{ secrets.TAP_TOKEN }}
+          path: homebrew-tap
+      - name: Update formula
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          SHA_ARM=$(awk '{print $1}' seance-aarch64-apple-darwin.tar.gz.sha256)
+          SHA_X86=$(awk '{print $1}' seance-x86_64-apple-darwin.tar.gz.sha256)
+          SHA_LINUX=$(awk '{print $1}' seance-x86_64-unknown-linux-gnu.tar.gz.sha256)
+
+          cat > homebrew-tap/Formula/seance.rb << EOF
+          class Seance < Formula
+            desc "Claude Code session browser and launcher"
+            homepage "https://github.com/chilang/seance"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/chilang/seance/releases/download/v${VERSION}/seance-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHA_ARM}"
+              else
+                url "https://github.com/chilang/seance/releases/download/v${VERSION}/seance-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHA_X86}"
+              end
+            end
+
+            on_linux do
+              url "https://github.com/chilang/seance/releases/download/v${VERSION}/seance-x86_64-unknown-linux-gnu.tar.gz"
+              sha256 "${SHA_LINUX}"
+            end
+
+            def install
+              bin.install "seance"
+            end
+
+            test do
+              assert_match "Séance", shell_output("#{bin}/seance --help")
+            end
+          end
+          EOF
+
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/seance.rb
+          git commit -m "seance ${VERSION}"
+          git push
