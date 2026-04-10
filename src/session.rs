@@ -16,6 +16,7 @@ pub struct Session {
     pub first_prompt: Option<String>,
     pub last_prompt: Option<String>,
     pub all_prompts: Vec<String>,
+    pub tool_keywords: Vec<String>,
     pub is_alive: bool,
 }
 
@@ -55,6 +56,8 @@ struct ContentBlock {
     #[serde(rename = "type")]
     block_type: Option<String>,
     text: Option<String>,
+    name: Option<String>,
+    input: Option<serde_json::Value>,
 }
 
 fn is_pid_alive(pid: u64) -> bool {
@@ -162,6 +165,59 @@ fn extract_user_text(entry: &JournalEntry) -> Option<String> {
     Some(text)
 }
 
+fn extract_assistant_keywords(entry: &JournalEntry) -> Vec<String> {
+    let msg = match entry.message.as_ref() {
+        Some(msg) => msg,
+        None => return Vec::new(),
+    };
+
+    let blocks = match msg {
+        MessageContent::Structured { content } => match content {
+            ContentValue::Blocks(blocks) => blocks,
+            ContentValue::Text(_) => return Vec::new(),
+        },
+        MessageContent::Other(_) => return Vec::new(),
+    };
+
+    let mut keywords = Vec::new();
+    let searchable_fields = ["command", "file_path", "path", "pattern", "prompt", "description"];
+
+    for block in blocks {
+        match block.block_type.as_deref() {
+            Some("tool_use") => {
+                let tool_name = block.name.as_deref().unwrap_or("");
+                let mut parts = vec![tool_name.to_string()];
+
+                if let Some(ref input) = block.input {
+                    for key in &searchable_fields {
+                        if let Some(val) = input.get(*key).and_then(|v| v.as_str()) {
+                            let truncated: String = val.chars().take(500).collect();
+                            parts.push(truncated);
+                        }
+                    }
+                }
+
+                let combined = parts.join(" ").to_lowercase();
+                if !combined.trim().is_empty() {
+                    keywords.push(combined);
+                }
+            }
+            Some("text") => {
+                if let Some(ref text) = block.text {
+                    let trimmed = text.trim();
+                    if !trimmed.is_empty() {
+                        let snippet: String = trimmed.chars().take(200).collect();
+                        keywords.push(snippet.to_lowercase());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    keywords
+}
+
 fn project_name_from_cwd(cwd: &str) -> String {
     Path::new(cwd)
         .file_name()
@@ -180,6 +236,7 @@ fn parse_session_file(path: &Path, alive_ids: &HashSet<String>) -> Option<Sessio
     let mut session_id: Option<String> = None;
     let mut cwd: Option<String> = None;
     let mut all_prompts: Vec<String> = Vec::new();
+    let mut tool_keywords: Vec<String> = Vec::new();
 
     for line in reader.lines() {
         let line = line.ok()?;
@@ -209,6 +266,11 @@ fn parse_session_file(path: &Path, alive_ids: &HashSet<String>) -> Option<Sessio
                 all_prompts.push(text);
             }
         }
+
+        // Extract assistant tool keywords
+        if entry.entry_type.as_deref() == Some("assistant") {
+            tool_keywords.extend(extract_assistant_keywords(&entry));
+        }
     }
 
     let sid = session_id.unwrap_or_else(|| {
@@ -235,6 +297,7 @@ fn parse_session_file(path: &Path, alive_ids: &HashSet<String>) -> Option<Sessio
         first_prompt,
         last_prompt,
         all_prompts,
+        tool_keywords,
         is_alive,
     })
 }

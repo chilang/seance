@@ -22,11 +22,13 @@ pub mod app {
         pub preview_scroll: usize,
         pub loading_done: bool,
         pub copied_flash: u8, // countdown frames to show "copied!" feedback
+        pub cached_filtered: Vec<usize>,
+        filter_dirty: bool,
     }
 
     impl App {
         pub fn new(sessions: Vec<Session>) -> Self {
-            Self {
+            let mut app = Self {
                 sessions,
                 selected: 0,
                 scroll_offset: 0,
@@ -37,11 +39,17 @@ pub mod app {
                 preview_scroll: 0,
                 loading_done: false,
                 copied_flash: 0,
-            }
+                cached_filtered: Vec::new(),
+                filter_dirty: true,
+            };
+            app.recompute_filter();
+            app
         }
 
-        pub fn filtered_indices(&self) -> Vec<usize> {
-            self.sessions
+        fn recompute_filter(&mut self) {
+            let q = self.filter_text.to_lowercase();
+            self.cached_filtered = self
+                .sessions
                 .iter()
                 .enumerate()
                 .filter(|(_, s)| {
@@ -51,12 +59,12 @@ pub mod app {
                     if self.show_dead_only && s.is_alive {
                         return false;
                     }
-                    if !self.filter_text.is_empty() {
-                        let q = self.filter_text.to_lowercase();
+                    if !q.is_empty() {
                         let matches = s.project_name.to_lowercase().contains(&q)
                             || s.cwd.to_lowercase().contains(&q)
                             || s.id.starts_with(&q)
-                            || s.all_prompts.iter().any(|p| p.to_lowercase().contains(&q));
+                            || s.all_prompts.iter().any(|p| p.to_lowercase().contains(&q))
+                            || s.tool_keywords.iter().any(|k| k.contains(&q));
                         if !matches {
                             return false;
                         }
@@ -64,7 +72,18 @@ pub mod app {
                     true
                 })
                 .map(|(i, _)| i)
-                .collect()
+                .collect();
+            self.filter_dirty = false;
+        }
+
+        pub fn ensure_filter(&mut self) {
+            if self.filter_dirty {
+                self.recompute_filter();
+            }
+        }
+
+        pub fn invalidate_filter(&mut self) {
+            self.filter_dirty = true;
         }
 
         pub fn move_up(&mut self) {
@@ -77,7 +96,8 @@ pub mod app {
         }
 
         pub fn move_down(&mut self, visible_height: usize) {
-            let total = self.filtered_indices().len();
+            self.ensure_filter();
+            let total = self.cached_filtered.len();
             if self.selected + 1 < total {
                 self.selected += 1;
                 if self.selected >= self.scroll_offset + visible_height {
@@ -92,21 +112,23 @@ pub mod app {
         }
 
         pub fn page_down(&mut self, visible_height: usize) {
-            let total = self.filtered_indices().len();
+            self.ensure_filter();
+            let total = self.cached_filtered.len();
             self.selected = (self.selected + visible_height).min(total.saturating_sub(1));
             let max_offset = total.saturating_sub(visible_height);
             self.scroll_offset = (self.scroll_offset + visible_height).min(max_offset);
         }
 
-        pub fn selected_session(&self) -> Option<&Session> {
-            let filtered = self.filtered_indices();
-            filtered
+        pub fn selected_session(&mut self) -> Option<&Session> {
+            self.ensure_filter();
+            self.cached_filtered
                 .get(self.selected)
                 .and_then(|&i| self.sessions.get(i))
         }
 
         pub fn clamp_selection(&mut self) {
-            let total = self.filtered_indices().len();
+            self.ensure_filter();
+            let total = self.cached_filtered.len();
             if total == 0 {
                 self.selected = 0;
                 self.scroll_offset = 0;
@@ -120,6 +142,7 @@ pub mod app {
             self.sessions.append(&mut more);
             self.sessions
                 .sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
+            self.invalidate_filter();
         }
     }
 }
@@ -219,6 +242,7 @@ fn run_app(
         }
 
         let visible_height = terminal.size()?.height.saturating_sub(13) as usize;
+        app.ensure_filter();
         terminal.draw(|f| ui::draw(f, app))?;
 
         // Poll with timeout so we can refresh for background loads / flash
@@ -232,6 +256,7 @@ fn run_app(
                     KeyCode::Esc => {
                         app.mode = Mode::Normal;
                         app.filter_text.clear();
+                        app.invalidate_filter();
                         app.clamp_selection();
                     }
                     KeyCode::Enter => {
@@ -240,11 +265,13 @@ fn run_app(
                     }
                     KeyCode::Backspace => {
                         app.filter_text.pop();
+                        app.invalidate_filter();
                         app.selected = 0;
                         app.scroll_offset = 0;
                     }
                     KeyCode::Char(c) => {
                         app.filter_text.push(c);
+                        app.invalidate_filter();
                         app.selected = 0;
                         app.scroll_offset = 0;
                     }
@@ -306,7 +333,7 @@ fn run_app(
                         app.scroll_offset = 0;
                     }
                     KeyCode::End | KeyCode::Char('G') => {
-                        let total = app.filtered_indices().len();
+                        let total = app.cached_filtered.len();
                         app.selected = total.saturating_sub(1);
                         app.scroll_offset = total.saturating_sub(visible_height);
                     }
@@ -316,12 +343,14 @@ fn run_app(
                     KeyCode::Char('a') => {
                         app.show_alive_only = !app.show_alive_only;
                         app.show_dead_only = false;
+                        app.invalidate_filter();
                         app.selected = 0;
                         app.scroll_offset = 0;
                     }
                     KeyCode::Char('d') => {
                         app.show_dead_only = !app.show_dead_only;
                         app.show_alive_only = false;
+                        app.invalidate_filter();
                         app.selected = 0;
                         app.scroll_offset = 0;
                     }

@@ -83,7 +83,7 @@ fn draw_session_list(f: &mut Frame, area: Rect, app: &App) {
     }
 
     let visible_height = inner.height as usize;
-    let filtered = app.filtered_indices();
+    let filtered = &app.cached_filtered;
     let total = filtered.len();
     let query = app.filter_text.to_lowercase();
 
@@ -203,7 +203,7 @@ fn draw_detail_panel(f: &mut Frame, area: Rect, app: &App) {
     let inner = block.inner(area);
     f.render_widget(block, area);
 
-    let filtered = app.filtered_indices();
+    let filtered = &app.cached_filtered;
     let session = filtered
         .get(app.selected)
         .and_then(|&i| app.sessions.get(i));
@@ -280,7 +280,7 @@ fn draw_detail_panel(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
-    let filtered = app.filtered_indices();
+    let filtered = &app.cached_filtered;
 
     let key =
         |k: &str| Span::styled(format!(" {k} "), Style::default().fg(SURFACE).bg(ACCENT).add_modifier(Modifier::BOLD));
@@ -372,7 +372,11 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
 }
 
 fn draw_preview_overlay(f: &mut Frame, app: &App) {
-    let Some(session) = app.selected_session() else {
+    let Some(session) = app
+        .cached_filtered
+        .get(app.selected)
+        .and_then(|&i| app.sessions.get(i))
+    else {
         return;
     };
 
