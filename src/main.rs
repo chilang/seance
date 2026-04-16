@@ -308,7 +308,7 @@ fn run_app(
                             if app.usage_ui_state.selected_turn + 1 < total_turns {
                                 app.usage_ui_state.selected_turn += 1;
                             }
-                            let visible = visible_height.max(10);
+                            let visible = (visible_height + 13).saturating_sub(30).max(8);
                             if app.usage_ui_state.selected_turn
                                 >= app.usage_ui_state.scroll_offset + visible
                             {
@@ -318,7 +318,7 @@ fn run_app(
                         }
                     }
                     KeyCode::PageUp => {
-                        let visible = visible_height.max(10);
+                        let visible = (visible_height + 13).saturating_sub(30).max(8);
                         app.usage_ui_state.selected_turn =
                             app.usage_ui_state.selected_turn.saturating_sub(visible);
                         app.usage_ui_state.scroll_offset =
@@ -327,7 +327,7 @@ fn run_app(
                     KeyCode::PageDown => {
                         if let Some(analysis) = &app.usage_analysis {
                             let total_turns = analysis.turns.len();
-                            let visible = visible_height.max(10);
+                            let visible = (visible_height + 13).saturating_sub(30).max(8);
                             app.usage_ui_state.selected_turn = (app.usage_ui_state.selected_turn
                                 + visible)
                                 .min(total_turns.saturating_sub(1));
@@ -356,7 +356,7 @@ fn run_app(
                             }
 
                             app.usage_ui_state.selected_turn = next_idx;
-                            let visible = visible_height.max(10);
+                            let visible = (visible_height + 13).saturating_sub(30).max(8);
                             if app.usage_ui_state.selected_turn
                                 >= app.usage_ui_state.scroll_offset + visible
                             {
@@ -387,7 +387,7 @@ fn run_app(
                             }
 
                             app.usage_ui_state.selected_turn = prev_idx;
-                            let visible = visible_height.max(10);
+                            let visible = (visible_height + 13).saturating_sub(30).max(8);
                             if app.usage_ui_state.selected_turn < app.usage_ui_state.scroll_offset {
                                 app.usage_ui_state.scroll_offset = app.usage_ui_state.selected_turn;
                             } else if app.usage_ui_state.selected_turn
@@ -405,7 +405,7 @@ fn run_app(
                     KeyCode::End | KeyCode::Char('G') => {
                         if let Some(analysis) = &app.usage_analysis {
                             let total_turns = analysis.turns.len();
-                            let visible = visible_height.max(10);
+                            let visible = (visible_height + 13).saturating_sub(30).max(8);
                             app.usage_ui_state.selected_turn = total_turns.saturating_sub(1);
                             app.usage_ui_state.scroll_offset = total_turns.saturating_sub(visible);
                         }
