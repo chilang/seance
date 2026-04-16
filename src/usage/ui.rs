@@ -400,13 +400,14 @@ fn render_timeline_with_state(
     let timeline_layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3), // Session overview
-            Constraint::Min(5),    // Token bars
-            Constraint::Length(2), // Legend
+            Constraint::Length(10), // Graphical Timeline
+            Constraint::Min(5),     // Token bars
+            Constraint::Length(2),  // Legend
         ])
         .split(inner);
 
-    render_session_overview(f, analysis, timeline_layout[0]);
+    render_graphical_timeline(f, analysis, timeline_layout[0], app_state);
+
     if show_bars {
         render_turns_with_bars_and_navigation(f, analysis, timeline_layout[1], app_state);
     } else {
@@ -1229,7 +1230,7 @@ fn render_turns_with_bars_and_navigation(
                 Cell::from(format!(
                     "{:.0}% {}",
                     cache_ratio,
-                    render_mini_bar_colored((cache_ratio as u64), 100, 4, '█', COLORS.cache_read)
+                    render_mini_bar_colored(cache_ratio as u64, 100, 4, '█', COLORS.cache_read)
                 ))
             };
 
@@ -1306,4 +1307,153 @@ fn render_help_bar_with_state(f: &mut Frame, app_state: &AppState, area: Rect) {
         .alignment(Alignment::Center);
 
     f.render_widget(text, area);
+}
+
+fn render_graphical_timeline(
+    f: &mut Frame,
+    analysis: &SessionAnalysis,
+    area: Rect,
+    app_state: &AppState,
+) {
+    if analysis.turns.is_empty() {
+        return;
+    }
+
+    let scroll = app_state.scroll_offset;
+    let selected = app_state.selected_turn;
+
+    let layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Min(0), Constraint::Length(8)])
+        .split(area);
+
+    let graph_area = layout[0];
+    let label_area = layout[1];
+
+    let visible_count = graph_area.width as usize;
+    let start_idx = scroll;
+    let end_idx = (scroll + visible_count).min(analysis.turns.len());
+
+    if start_idx >= analysis.turns.len() {
+        return;
+    }
+    let visible_turns = &analysis.turns[start_idx..end_idx];
+
+    let max_tokens = analysis
+        .turns
+        .iter()
+        .map(|t| t.total_tokens)
+        .max()
+        .unwrap_or(1);
+    let max_cost = analysis
+        .turns
+        .iter()
+        .map(|t| t.cost)
+        .fold(0.0, f64::max)
+        .max(0.001);
+
+    let token_data: Vec<u64> = visible_turns.iter().map(|t| t.total_tokens).collect();
+    let cost_data: Vec<u64> = visible_turns
+        .iter()
+        .map(|t| (t.cost * 10000.0) as u64)
+        .collect();
+
+    let ribbon_spans: Vec<Span> = visible_turns
+        .iter()
+        .enumerate()
+        .map(|(i, t)| {
+            let real_idx = scroll + i;
+            let prompt_tokens = t.input + t.cache_read + t.cache_creation;
+            let cache_ratio = if prompt_tokens > 0 {
+                t.cache_read as f64 / prompt_tokens as f64
+            } else {
+                0.0
+            };
+
+            let color = if cache_ratio > 0.8 {
+                COLORS.cache_read
+            } else if cache_ratio > 0.5 {
+                Color::Yellow
+            } else {
+                Color::Rgb(80, 80, 80)
+            };
+
+            let mut style = Style::default().fg(color);
+            if real_idx == selected {
+                style = style.fg(Color::White);
+            }
+
+            Span::styled("█", style)
+        })
+        .collect();
+
+    let v_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5), // Tokens sparkline + border
+            Constraint::Length(3), // Cost sparkline + border
+            Constraint::Length(1), // Cache ribbon
+            Constraint::Length(1), // Bottom Spacer
+        ])
+        .split(graph_area);
+
+    let border_style = Style::default().fg(Color::DarkGray);
+
+    let tokens_sparkline = Sparkline::default()
+        .data(&token_data)
+        .max(max_tokens)
+        .style(Style::default().fg(COLORS.input))
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(border_style),
+        );
+
+    let cost_sparkline = Sparkline::default()
+        .data(&cost_data)
+        .max((max_cost * 10000.0) as u64)
+        .style(Style::default().fg(COLORS.cost))
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(border_style),
+        );
+
+    let ribbon_para = Paragraph::new(Line::from(ribbon_spans));
+
+    f.render_widget(tokens_sparkline, v_layout[0]);
+    f.render_widget(cost_sparkline, v_layout[1]);
+    f.render_widget(ribbon_para, v_layout[2]);
+
+    let label_v_layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(5), // Tokens + border
+            Constraint::Length(3), // Cost + border
+            Constraint::Length(1), // Cache ribbon
+            Constraint::Length(1), // Bottom Spacer
+        ])
+        .split(label_area);
+
+    let token_label = Paragraph::new(format!(" T:{}", format_number(max_tokens)))
+        .style(Style::default().fg(Color::Gray))
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(border_style),
+        );
+
+    let cost_label = Paragraph::new(format!(" ${:.2}", max_cost))
+        .style(Style::default().fg(Color::Gray))
+        .block(
+            Block::default()
+                .borders(Borders::BOTTOM)
+                .border_style(border_style),
+        );
+
+    let cache_label = Paragraph::new(" Cache").style(Style::default().fg(Color::Gray));
+
+    f.render_widget(token_label, label_v_layout[0]);
+    f.render_widget(cost_label, label_v_layout[1]);
+    f.render_widget(cache_label, label_v_layout[2]);
 }
