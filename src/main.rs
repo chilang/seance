@@ -1,5 +1,6 @@
 mod session;
 mod ui;
+mod usage;
 
 pub mod app {
     use crate::session::Session;
@@ -9,6 +10,7 @@ pub mod app {
         Normal,
         Filter,
         Preview,
+        Usage,
     }
 
     pub struct App {
@@ -23,6 +25,8 @@ pub mod app {
         pub loading_done: bool,
         pub copied_flash: u8, // countdown frames to show "copied!" feedback
         pub cached_filtered: Vec<usize>,
+        pub usage_analysis: Option<crate::usage::models::SessionAnalysis>,
+        pub usage_ui_state: crate::usage::ui::AppState,
         filter_dirty: bool,
     }
 
@@ -40,6 +44,12 @@ pub mod app {
                 loading_done: false,
                 copied_flash: 0,
                 cached_filtered: Vec::new(),
+                usage_analysis: None,
+                usage_ui_state: crate::usage::ui::AppState {
+                    show_bars: false,
+                    scroll_offset: 0,
+                    selected_turn: 0,
+                },
                 filter_dirty: true,
             };
             app.recompute_filter();
@@ -277,13 +287,141 @@ fn run_app(
                     }
                     _ => {}
                 },
+                Mode::Usage => match key.code {
+                    KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('u') | KeyCode::Char(' ') => {
+                        app.mode = Mode::Normal;
+                    }
+                    KeyCode::Char('b') => {
+                        app.usage_ui_state.show_bars = !app.usage_ui_state.show_bars;
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        if app.usage_ui_state.selected_turn > 0 {
+                            app.usage_ui_state.selected_turn -= 1;
+                        }
+                        if app.usage_ui_state.selected_turn < app.usage_ui_state.scroll_offset {
+                            app.usage_ui_state.scroll_offset = app.usage_ui_state.selected_turn;
+                        }
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        if let Some(analysis) = &app.usage_analysis {
+                            let total_turns = analysis.turns.len();
+                            if app.usage_ui_state.selected_turn + 1 < total_turns {
+                                app.usage_ui_state.selected_turn += 1;
+                            }
+                            let visible = visible_height.max(10);
+                            if app.usage_ui_state.selected_turn
+                                >= app.usage_ui_state.scroll_offset + visible
+                            {
+                                app.usage_ui_state.scroll_offset =
+                                    app.usage_ui_state.selected_turn.saturating_sub(visible - 1);
+                            }
+                        }
+                    }
+                    KeyCode::PageUp => {
+                        let visible = visible_height.max(10);
+                        app.usage_ui_state.selected_turn =
+                            app.usage_ui_state.selected_turn.saturating_sub(visible);
+                        app.usage_ui_state.scroll_offset =
+                            app.usage_ui_state.scroll_offset.saturating_sub(visible);
+                    }
+                    KeyCode::PageDown => {
+                        if let Some(analysis) = &app.usage_analysis {
+                            let total_turns = analysis.turns.len();
+                            let visible = visible_height.max(10);
+                            app.usage_ui_state.selected_turn = (app.usage_ui_state.selected_turn
+                                + visible)
+                                .min(total_turns.saturating_sub(1));
+                            app.usage_ui_state.scroll_offset = (app.usage_ui_state.scroll_offset
+                                + visible)
+                                .min(total_turns.saturating_sub(visible));
+                        }
+                    }
+                    KeyCode::Char(']') | KeyCode::Char('L') | KeyCode::Char('n') => {
+                        if let Some(analysis) = &app.usage_analysis {
+                            // Find next session group start
+                            let current_idx = app.usage_ui_state.selected_turn;
+                            let mut next_idx = current_idx;
+                            let mut current_turn_count = 0;
+
+                            for session in &analysis.session_stats.sessions {
+                                current_turn_count += session.turn_count;
+                                if current_turn_count > current_idx {
+                                    if current_turn_count < analysis.turns.len() {
+                                        next_idx = current_turn_count;
+                                    } else {
+                                        next_idx = analysis.turns.len().saturating_sub(1);
+                                    }
+                                    break;
+                                }
+                            }
+
+                            app.usage_ui_state.selected_turn = next_idx;
+                            let visible = visible_height.max(10);
+                            if app.usage_ui_state.selected_turn
+                                >= app.usage_ui_state.scroll_offset + visible
+                            {
+                                app.usage_ui_state.scroll_offset =
+                                    app.usage_ui_state.selected_turn.saturating_sub(visible - 1);
+                            } else if app.usage_ui_state.selected_turn
+                                < app.usage_ui_state.scroll_offset
+                            {
+                                app.usage_ui_state.scroll_offset = app.usage_ui_state.selected_turn;
+                            }
+                        }
+                    }
+                    KeyCode::Char('[') | KeyCode::Char('H') | KeyCode::Char('N') => {
+                        if let Some(analysis) = &app.usage_analysis {
+                            // Find previous session group start
+                            let current_idx = app.usage_ui_state.selected_turn;
+                            let mut prev_idx = 0;
+                            let mut current_turn_count = 0;
+
+                            for session in &analysis.session_stats.sessions {
+                                if current_turn_count > 0 && current_turn_count < current_idx {
+                                    prev_idx = current_turn_count;
+                                }
+                                current_turn_count += session.turn_count;
+                                if current_turn_count >= current_idx {
+                                    break;
+                                }
+                            }
+
+                            app.usage_ui_state.selected_turn = prev_idx;
+                            let visible = visible_height.max(10);
+                            if app.usage_ui_state.selected_turn < app.usage_ui_state.scroll_offset {
+                                app.usage_ui_state.scroll_offset = app.usage_ui_state.selected_turn;
+                            } else if app.usage_ui_state.selected_turn
+                                >= app.usage_ui_state.scroll_offset + visible
+                            {
+                                app.usage_ui_state.scroll_offset =
+                                    app.usage_ui_state.selected_turn.saturating_sub(visible - 1);
+                            }
+                        }
+                    }
+                    KeyCode::Home | KeyCode::Char('g') => {
+                        app.usage_ui_state.selected_turn = 0;
+                        app.usage_ui_state.scroll_offset = 0;
+                    }
+                    KeyCode::End | KeyCode::Char('G') => {
+                        if let Some(analysis) = &app.usage_analysis {
+                            let total_turns = analysis.turns.len();
+                            let visible = visible_height.max(10);
+                            app.usage_ui_state.selected_turn = total_turns.saturating_sub(1);
+                            app.usage_ui_state.scroll_offset = total_turns.saturating_sub(visible);
+                        }
+                    }
+                    _ => {}
+                },
                 Mode::Preview => {
                     let preview_lines = app
                         .selected_session()
                         .map(|s| preview_line_count(s))
                         .unwrap_or(0);
                     match key.code {
-                        KeyCode::Esc | KeyCode::Char('p') | KeyCode::Char(' ') | KeyCode::Char('q') => {
+                        KeyCode::Esc
+                        | KeyCode::Char('p')
+                        | KeyCode::Char(' ')
+                        | KeyCode::Char('q') => {
                             app.mode = Mode::Normal;
                             app.preview_scroll = 0;
                         }
@@ -291,13 +429,19 @@ fn run_app(
                             app.preview_scroll = app.preview_scroll.saturating_sub(1);
                         }
                         KeyCode::Down | KeyCode::Char('j') => {
-                            app.preview_scroll = app.preview_scroll.saturating_add(1).min(preview_lines.saturating_sub(1));
+                            app.preview_scroll = app
+                                .preview_scroll
+                                .saturating_add(1)
+                                .min(preview_lines.saturating_sub(1));
                         }
                         KeyCode::PageUp => {
                             app.preview_scroll = app.preview_scroll.saturating_sub(20);
                         }
                         KeyCode::PageDown => {
-                            app.preview_scroll = app.preview_scroll.saturating_add(20).min(preview_lines.saturating_sub(1));
+                            app.preview_scroll = app
+                                .preview_scroll
+                                .saturating_add(20)
+                                .min(preview_lines.saturating_sub(1));
                         }
                         KeyCode::Home | KeyCode::Char('g') => {
                             app.preview_scroll = 0;
@@ -358,6 +502,35 @@ fn run_app(
                         if app.selected_session().is_some() {
                             app.mode = Mode::Preview;
                             app.preview_scroll = 0;
+                        }
+                    }
+                    KeyCode::Char('u') => {
+                        if let Some(s) = app.selected_session() {
+                            let path = format!(
+                                "{}/.claude/projects/{}/{}.jsonl",
+                                dirs::home_dir().unwrap().to_string_lossy(),
+                                s.cwd.replace('/', "-"),
+                                s.id
+                            );
+
+                            let parsed = crate::usage::parsers::parse_jsonl_file(
+                                std::path::Path::new(&path),
+                                true,
+                            )
+                            .unwrap_or_default();
+
+                            if !parsed.is_empty() {
+                                if let Ok(analysis) = crate::usage::analyzers::analyze_session(
+                                    parsed,
+                                    crate::usage::models::SessionId(s.id.clone()),
+                                    crate::usage::models::CostMode::Auto,
+                                ) {
+                                    app.usage_analysis = Some(analysis);
+                                    app.usage_ui_state.selected_turn = 0;
+                                    app.usage_ui_state.scroll_offset = 0;
+                                    app.mode = Mode::Usage;
+                                }
+                            }
                         }
                     }
                     KeyCode::Enter => {
@@ -486,6 +659,20 @@ fn shell_escape(s: &str) -> String {
     }
 }
 
+fn format_tokens(t: u64) -> String {
+    if t >= 1_000_000 {
+        format!("{:.1}M", t as f64 / 1_000_000.0)
+    } else if t >= 1_000 {
+        format!("{:.0}k", t as f64 / 1_000.0)
+    } else {
+        format!("{}", t)
+    }
+}
+
+fn format_percentage(pct: f64) -> String {
+    format!("{:.0}%", pct * 100.0)
+}
+
 fn print_session_list() -> Result<()> {
     let sessions = session::discover_sessions();
     for s in &sessions {
@@ -493,9 +680,11 @@ fn print_session_list() -> Result<()> {
         let time = s.last_modified.format("%m-%d %H:%M");
         let prompt = s.first_prompt.as_deref().unwrap_or("—");
         let prompt_trunc: String = prompt.chars().take(60).collect();
+        let tokens_str = format_tokens(s.total_tokens);
+        let cache_str = format_percentage(s.cache_hit_rate);
         println!(
-            "{} {} {:<28} {:>3}msg  {}",
-            status, time, s.project_name, s.user_msg_count, prompt_trunc
+            "{} {} {:<28} {:>3}msg {:>5} {:>4}  {}",
+            status, time, s.project_name, s.user_msg_count, tokens_str, cache_str, prompt_trunc
         );
     }
     Ok(())

@@ -21,11 +21,25 @@ const MATCH_FG: Color = Color::Rgb(255, 220, 80);
 const PREVIEW_BG: Color = Color::Rgb(18, 18, 26);
 const PROMPT_NUM: Color = Color::Rgb(120, 80, 200);
 
+fn format_tokens(t: u64) -> String {
+    if t >= 1_000_000 {
+        format!("{:.1}M", t as f64 / 1_000_000.0)
+    } else if t >= 1_000 {
+        format!("{:.0}k", t as f64 / 1_000.0)
+    } else {
+        format!("{}", t)
+    }
+}
+
+fn format_percentage(pct: f64) -> String {
+    format!("{:.0}%", pct * 100.0)
+}
+
 pub fn draw(f: &mut Frame, app: &App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),  // header
+            Constraint::Length(3), // header
             Constraint::Min(8),    // session list
             Constraint::Length(9), // detail panel
             Constraint::Length(1), // status bar
@@ -39,18 +53,67 @@ pub fn draw(f: &mut Frame, app: &App) {
 
     if app.mode == Mode::Preview {
         draw_preview_overlay(f, app);
+    } else if app.mode == Mode::Usage {
+        if let Some(analysis) = &app.usage_analysis {
+            let area = f.area();
+            let margin_h = 2u16;
+            let margin_v = 2u16;
+            let overlay = Rect {
+                x: area.x + margin_h,
+                y: area.y + margin_v,
+                width: area.width.saturating_sub(margin_h * 2),
+                height: area.height.saturating_sub(margin_v * 2),
+            };
+            f.render_widget(Clear, overlay);
+            crate::usage::ui::render_session_analysis_with_state(
+                f,
+                analysis,
+                overlay,
+                &app.usage_ui_state,
+            );
+        }
     }
 }
 
 fn draw_header(f: &mut Frame, area: Rect, app: &App) {
     let mut spans = vec![
         Span::styled("  🔮 ", Style::default()),
-        Span::styled("S", Style::default().fg(Color::Rgb(200, 100, 255)).add_modifier(Modifier::BOLD)),
-        Span::styled("É", Style::default().fg(Color::Rgb(190, 110, 255)).add_modifier(Modifier::BOLD)),
-        Span::styled("A", Style::default().fg(Color::Rgb(180, 120, 255)).add_modifier(Modifier::BOLD)),
-        Span::styled("N", Style::default().fg(Color::Rgb(170, 130, 255)).add_modifier(Modifier::BOLD)),
-        Span::styled("C", Style::default().fg(Color::Rgb(160, 140, 255)).add_modifier(Modifier::BOLD)),
-        Span::styled("E", Style::default().fg(Color::Rgb(150, 150, 255)).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "S",
+            Style::default()
+                .fg(Color::Rgb(200, 100, 255))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "É",
+            Style::default()
+                .fg(Color::Rgb(190, 110, 255))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "A",
+            Style::default()
+                .fg(Color::Rgb(180, 120, 255))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "N",
+            Style::default()
+                .fg(Color::Rgb(170, 130, 255))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "C",
+            Style::default()
+                .fg(Color::Rgb(160, 140, 255))
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::styled(
+            "E",
+            Style::default()
+                .fg(Color::Rgb(150, 150, 255))
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("  ·  ", Style::default().fg(DIM)),
         Span::styled("Claude Code Session Necromancer", Style::default().fg(DIM)),
     ];
@@ -117,11 +180,14 @@ fn draw_session_list(f: &mut Frame, area: Rect, app: &App) {
         } else {
             vec![Span::styled(
                 format!("{:<28}", pname),
-                Style::default().fg(CYAN).bg(bg).add_modifier(if s.is_alive {
-                    Modifier::BOLD
-                } else {
-                    Modifier::empty()
-                }),
+                Style::default()
+                    .fg(CYAN)
+                    .bg(bg)
+                    .add_modifier(if s.is_alive {
+                        Modifier::BOLD
+                    } else {
+                        Modifier::empty()
+                    }),
             )]
         };
 
@@ -139,8 +205,22 @@ fn draw_session_list(f: &mut Frame, area: Rect, app: &App) {
         };
         let size = Span::styled(format!("{} ", size_str), Style::default().fg(DIM).bg(bg));
 
+        // Tokens
+        let tokens_str = format!("{:>5} ", format_tokens(s.total_tokens));
+        let tokens = Span::styled(
+            tokens_str,
+            Style::default().fg(Color::Rgb(150, 150, 200)).bg(bg),
+        );
+
+        // Cache Hit Rate
+        let cache_str = format!("{:>4} ", format_percentage(s.cache_hit_rate));
+        let cache = Span::styled(
+            cache_str,
+            Style::default().fg(Color::Rgb(100, 200, 150)).bg(bg),
+        );
+
         // First prompt with highlight
-        let used = 3 + 6 + 28 + 7 + 7;
+        let used = 3 + 6 + 28 + 8 + 6 + 5 + 7;
         let remaining = (inner.width as usize).saturating_sub(used + 1);
         let prompt_text = s.first_prompt.as_deref().unwrap_or("—");
         let prompt_oneline: String = prompt_text
@@ -172,6 +252,8 @@ fn draw_session_list(f: &mut Frame, area: Rect, app: &App) {
         let mut row_spans = vec![dot, time];
         row_spans.extend(project_spans);
         row_spans.push(count);
+        row_spans.push(tokens);
+        row_spans.push(cache);
         row_spans.push(size);
         row_spans.extend(prompt_spans);
         row_spans.push(pad);
@@ -282,8 +364,15 @@ fn draw_detail_panel(f: &mut Frame, area: Rect, app: &App) {
 fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
     let filtered = &app.cached_filtered;
 
-    let key =
-        |k: &str| Span::styled(format!(" {k} "), Style::default().fg(SURFACE).bg(ACCENT).add_modifier(Modifier::BOLD));
+    let key = |k: &str| {
+        Span::styled(
+            format!(" {k} "),
+            Style::default()
+                .fg(SURFACE)
+                .bg(ACCENT)
+                .add_modifier(Modifier::BOLD),
+        )
+    };
     let desc = |d: &str| Span::styled(format!(" {d} "), Style::default().fg(DIM).bg(SURFACE));
 
     let spans = match app.mode {
@@ -304,9 +393,7 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                 key("/"),
                 Span::styled(
                     format!(" {}{} ", app.filter_text, cursor),
-                    Style::default()
-                        .fg(Color::White)
-                        .bg(Color::Rgb(50, 48, 65)),
+                    Style::default().fg(Color::White).bg(Color::Rgb(50, 48, 65)),
                 ),
                 desc("Enter confirm · Esc clear"),
                 Span::styled(
@@ -325,6 +412,18 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                 desc("close"),
             ]
         }
+        Mode::Usage => {
+            vec![
+                key("b"),
+                desc("bars"),
+                key("↑↓"),
+                desc("scroll"),
+                key("PgUp/PgDn"),
+                desc("page"),
+                key("Esc"),
+                desc("close"),
+            ]
+        }
         Mode::Normal => {
             let mut s = vec![
                 key("↑↓"),
@@ -335,6 +434,8 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                 desc("here"),
                 key("p"),
                 desc("preview"),
+                key("u"),
+                desc("usage"),
                 key("/"),
                 desc("search"),
                 key("a"),
@@ -436,14 +537,10 @@ fn draw_preview_overlay(f: &mut Frame, app: &App) {
             ""
         };
 
-        let mut header_spans = vec![
-            Span::styled(
-                format!("  #{:<3}", i + 1),
-                Style::default()
-                    .fg(num_color)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ];
+        let mut header_spans = vec![Span::styled(
+            format!("  #{:<3}", i + 1),
+            Style::default().fg(num_color).add_modifier(Modifier::BOLD),
+        )];
         if !tag.is_empty() {
             header_spans.push(Span::styled(
                 format!(" {tag}"),
@@ -469,7 +566,9 @@ fn draw_preview_overlay(f: &mut Frame, app: &App) {
                 } else {
                     lines.push(Line::from(Span::styled(
                         format!("    {chunk}"),
-                        Style::default().fg(Color::Rgb(200, 200, 210)).bg(PREVIEW_BG),
+                        Style::default()
+                            .fg(Color::Rgb(200, 200, 210))
+                            .bg(PREVIEW_BG),
                     )));
                 }
             }
@@ -544,9 +643,7 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
     let mut remaining = text;
     while remaining.len() > max_width {
         // Try to break at a space
-        let break_at = remaining[..max_width]
-            .rfind(' ')
-            .unwrap_or(max_width);
+        let break_at = remaining[..max_width].rfind(' ').unwrap_or(max_width);
         lines.push(remaining[..break_at].to_string());
         remaining = remaining[break_at..].trim_start();
     }

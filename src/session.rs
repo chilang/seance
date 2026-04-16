@@ -18,6 +18,8 @@ pub struct Session {
     pub all_prompts: Vec<String>,
     pub tool_keywords: Vec<String>,
     pub is_alive: bool,
+    pub total_tokens: u64,
+    pub cache_hit_rate: f64,
 }
 
 #[derive(Deserialize)]
@@ -38,9 +40,20 @@ struct JournalEntry {
 }
 
 #[derive(Deserialize)]
+struct TokenUsageRaw {
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cache_creation_input_tokens: Option<u64>,
+    cache_read_input_tokens: Option<u64>,
+}
+
+#[derive(Deserialize)]
 #[serde(untagged)]
 enum MessageContent {
-    Structured { content: ContentValue },
+    Structured {
+        content: ContentValue,
+        usage: Option<TokenUsageRaw>,
+    },
     Other(()),
 }
 
@@ -87,19 +100,15 @@ fn get_alive_session_ids(claude_dir: &Path) -> HashSet<String> {
 fn extract_user_text(entry: &JournalEntry) -> Option<String> {
     let msg = entry.message.as_ref()?;
     let raw = match msg {
-        MessageContent::Structured { content } => match content {
+        MessageContent::Structured { content, .. } => match content {
             ContentValue::Text(s) => s.clone(),
-            ContentValue::Blocks(blocks) => {
-                blocks
-                    .iter()
-                    .find_map(|b| {
-                        if b.block_type.as_deref() == Some("text") {
-                            b.text.clone().filter(|t| !t.trim().is_empty())
-                        } else {
-                            None
-                        }
-                    })?
-            }
+            ContentValue::Blocks(blocks) => blocks.iter().find_map(|b| {
+                if b.block_type.as_deref() == Some("text") {
+                    b.text.clone().filter(|t| !t.trim().is_empty())
+                } else {
+                    None
+                }
+            })?,
         },
         MessageContent::Other(_) => return None,
     };
@@ -172,7 +181,7 @@ fn extract_assistant_keywords(entry: &JournalEntry) -> Vec<String> {
     };
 
     let blocks = match msg {
-        MessageContent::Structured { content } => match content {
+        MessageContent::Structured { content, .. } => match content {
             ContentValue::Blocks(blocks) => blocks,
             ContentValue::Text(_) => return Vec::new(),
         },
@@ -180,7 +189,14 @@ fn extract_assistant_keywords(entry: &JournalEntry) -> Vec<String> {
     };
 
     let mut keywords = Vec::new();
-    let searchable_fields = ["command", "file_path", "path", "pattern", "prompt", "description"];
+    let searchable_fields = [
+        "command",
+        "file_path",
+        "path",
+        "pattern",
+        "prompt",
+        "description",
+    ];
 
     for block in blocks {
         match block.block_type.as_deref() {
@@ -238,6 +254,11 @@ fn parse_session_file(path: &Path, alive_ids: &HashSet<String>) -> Option<Sessio
     let mut all_prompts: Vec<String> = Vec::new();
     let mut tool_keywords: Vec<String> = Vec::new();
 
+    let mut input_tokens = 0;
+    let mut output_tokens = 0;
+    let mut cache_creation_tokens = 0;
+    let mut cache_read_tokens = 0;
+
     for line in reader.lines() {
         let line = line.ok()?;
         if line.trim().is_empty() {
@@ -271,6 +292,17 @@ fn parse_session_file(path: &Path, alive_ids: &HashSet<String>) -> Option<Sessio
         if entry.entry_type.as_deref() == Some("assistant") {
             tool_keywords.extend(extract_assistant_keywords(&entry));
         }
+
+        // Accumulate tokens from message usage
+        if let Some(MessageContent::Structured {
+            usage: Some(usage), ..
+        }) = &entry.message
+        {
+            input_tokens += usage.input_tokens.unwrap_or(0);
+            output_tokens += usage.output_tokens.unwrap_or(0);
+            cache_creation_tokens += usage.cache_creation_input_tokens.unwrap_or(0);
+            cache_read_tokens += usage.cache_read_input_tokens.unwrap_or(0);
+        }
     }
 
     let sid = session_id.unwrap_or_else(|| {
@@ -287,6 +319,14 @@ fn parse_session_file(path: &Path, alive_ids: &HashSet<String>) -> Option<Sessio
     let first_prompt = all_prompts.first().cloned();
     let last_prompt = all_prompts.last().cloned();
 
+    let total_tokens = input_tokens + output_tokens + cache_creation_tokens + cache_read_tokens;
+    let prompt_tokens = input_tokens + cache_creation_tokens + cache_read_tokens;
+    let cache_hit_rate = if prompt_tokens > 0 {
+        cache_read_tokens as f64 / prompt_tokens as f64
+    } else {
+        0.0
+    };
+
     Some(Session {
         id: sid,
         cwd,
@@ -299,6 +339,8 @@ fn parse_session_file(path: &Path, alive_ids: &HashSet<String>) -> Option<Sessio
         all_prompts,
         tool_keywords,
         is_alive,
+        total_tokens,
+        cache_hit_rate,
     })
 }
 
@@ -322,9 +364,7 @@ fn collect_session_files() -> (Vec<(PathBuf, std::time::SystemTime)>, HashSet<St
                 for file in dir_files.flatten() {
                     let fpath = file.path();
                     if fpath.extension().map_or(false, |e| e == "jsonl")
-                        && !fpath
-                            .parent()
-                            .map_or(false, |p| p.ends_with("subagents"))
+                        && !fpath.parent().map_or(false, |p| p.ends_with("subagents"))
                     {
                         if let Ok(meta) = fs::metadata(&fpath) {
                             if let Ok(mtime) = meta.modified() {
@@ -343,18 +383,31 @@ fn collect_session_files() -> (Vec<(PathBuf, std::time::SystemTime)>, HashSet<St
 }
 
 /// Parse a batch of session files. Returns parsed sessions (skipping empties).
-fn parse_batch(files: &[(PathBuf, std::time::SystemTime)], alive_ids: &HashSet<String>) -> Vec<Session> {
+fn parse_batch(
+    files: &[(PathBuf, std::time::SystemTime)],
+    alive_ids: &HashSet<String>,
+) -> Vec<Session> {
     files
         .iter()
         .filter_map(|(path, _)| {
             let s = parse_session_file(path, alive_ids)?;
-            if s.user_msg_count == 0 { None } else { Some(s) }
+            if s.user_msg_count == 0 {
+                None
+            } else {
+                Some(s)
+            }
         })
         .collect()
 }
 
 /// Load recent sessions first (fast initial render), return remaining file list for background loading.
-pub fn discover_sessions_incremental(batch_size: usize) -> (Vec<Session>, Vec<(PathBuf, std::time::SystemTime)>, HashSet<String>) {
+pub fn discover_sessions_incremental(
+    batch_size: usize,
+) -> (
+    Vec<Session>,
+    Vec<(PathBuf, std::time::SystemTime)>,
+    HashSet<String>,
+) {
     let (files, alive_ids) = collect_session_files();
     let first_batch_end = batch_size.min(files.len());
     let first_batch = parse_batch(&files[..first_batch_end], &alive_ids);
@@ -363,7 +416,10 @@ pub fn discover_sessions_incremental(batch_size: usize) -> (Vec<Session>, Vec<(P
 }
 
 /// Parse the remaining files (called from background after initial render).
-pub fn load_remaining(files: &[(PathBuf, std::time::SystemTime)], alive_ids: &HashSet<String>) -> Vec<Session> {
+pub fn load_remaining(
+    files: &[(PathBuf, std::time::SystemTime)],
+    alive_ids: &HashSet<String>,
+) -> Vec<Session> {
     parse_batch(files, alive_ids)
 }
 
@@ -373,4 +429,57 @@ pub fn discover_sessions() -> Vec<Session> {
     let mut sessions = parse_batch(&files, &alive_ids);
     sessions.sort_by(|a, b| b.last_modified.cmp(&a.last_modified));
     sessions
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_session_tokens_and_cache_hit_rate() {
+        let temp_dir = std::env::temp_dir();
+        let test_file_path = temp_dir.join("test_session_tokens.jsonl");
+
+        // Write dummy JSONL content
+        // Must provide `content` field because it is required by `Structured`.
+        let jsonl_content = r#"
+{"type":"assistant","message":{"content":"dummy","usage":{"input_tokens":100,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+{"type":"assistant","message":{"content":[],"usage":{"input_tokens":10,"output_tokens":20,"cache_creation_input_tokens":200,"cache_read_input_tokens":300}}}
+{"type":"assistant","message":{"content":"","usage":{"input_tokens":0,"output_tokens":10,"cache_creation_input_tokens":0,"cache_read_input_tokens":400}}}
+"#;
+        std::fs::write(&test_file_path, jsonl_content.trim()).unwrap();
+
+        let alive_ids = HashSet::new();
+
+        let session = parse_session_file(&test_file_path, &alive_ids)
+            .expect("Should parse session successfully");
+
+        // input_tokens: 100 + 10 + 0 = 110
+        // output_tokens: 50 + 20 + 10 = 80
+        // cache_creation: 0 + 200 + 0 = 200
+        // cache_read: 0 + 300 + 400 = 700
+
+        // total: 110 + 80 + 200 + 700 = 1090
+        assert_eq!(session.total_tokens, 1090);
+
+        // prompt: 110 + 200 + 700 = 1010
+        // cache hit rate: 700 / 1010 = 0.6930693069306931
+        assert!((session.cache_hit_rate - (700.0 / 1010.0)).abs() < 1e-6);
+
+        let test_file_path_zero = temp_dir.join("test_session_tokens_zero.jsonl");
+        let jsonl_content_zero = r#"
+{"type":"assistant","message":{"content":"zero","usage":{"input_tokens":0,"output_tokens":50,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
+"#;
+        std::fs::write(&test_file_path_zero, jsonl_content_zero.trim()).unwrap();
+
+        let session_zero = parse_session_file(&test_file_path_zero, &alive_ids)
+            .expect("Should parse zero session successfully");
+
+        assert_eq!(session_zero.total_tokens, 50);
+        assert_eq!(session_zero.cache_hit_rate, 0.0);
+
+        // Clean up files
+        let _ = std::fs::remove_file(&test_file_path);
+        let _ = std::fs::remove_file(&test_file_path_zero);
+    }
 }
