@@ -513,18 +513,9 @@ fn run_app(
                     }
                     KeyCode::Char('u') => {
                         if let Some(s) = app.selected_session() {
-                            let path = format!(
-                                "{}/.claude/projects/{}/{}.jsonl",
-                                dirs::home_dir().unwrap().to_string_lossy(),
-                                s.cwd.replace('/', "-"),
-                                s.id
-                            );
-
-                            let parsed = crate::usage::parsers::parse_jsonl_file(
-                                std::path::Path::new(&path),
-                                true,
-                            )
-                            .unwrap_or_default();
+                            let parsed =
+                                crate::usage::parsers::parse_jsonl_file(&s.file_path, true)
+                                    .unwrap_or_default();
 
                             if !parsed.is_empty() {
                                 if let Ok(analysis) = crate::usage::analyzers::analyze_session(

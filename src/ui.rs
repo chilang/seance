@@ -475,8 +475,18 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
             let total = app.sessions.len();
             let shown = filtered.len();
             let alive = app.sessions.iter().filter(|s| s.is_alive).count();
+            let session_id_str = if let Some(session) = app
+                .cached_filtered
+                .get(app.selected)
+                .and_then(|&i| app.sessions.get(i))
+            {
+                format!(" · {}", obfuscate(&session.id, app.privacy_mode))
+            } else {
+                String::new()
+            };
+
             s.push(Span::styled(
-                format!("  {shown}/{total} · {alive} alive"),
+                format!("  {shown}/{total} · {alive} alive{}", session_id_str),
                 Style::default().fg(DIM),
             ));
             s
