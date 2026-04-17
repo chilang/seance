@@ -27,6 +27,7 @@ pub mod app {
         pub cached_filtered: Vec<usize>,
         pub usage_analysis: Option<crate::usage::models::SessionAnalysis>,
         pub usage_ui_state: crate::usage::ui::AppState,
+        pub privacy_mode: bool,
         filter_dirty: bool,
     }
 
@@ -49,7 +50,9 @@ pub mod app {
                     show_bars: false,
                     scroll_offset: 0,
                     selected_turn: 0,
+                    privacy_mode: false,
                 },
+                privacy_mode: false,
                 filter_dirty: true,
             };
             app.recompute_filter();
@@ -498,6 +501,10 @@ fn run_app(
                         app.selected = 0;
                         app.scroll_offset = 0;
                     }
+                    KeyCode::Char('x') => {
+                        app.privacy_mode = !app.privacy_mode;
+                        app.usage_ui_state.privacy_mode = app.privacy_mode;
+                    }
                     KeyCode::Char('p') | KeyCode::Char(' ') => {
                         if app.selected_session().is_some() {
                             app.mode = Mode::Preview;
@@ -708,6 +715,7 @@ TUI KEYS:
     /               Search/filter sessions (searches all prompts)
     a               Toggle: show alive sessions only
     d               Toggle: show dead sessions only
+    x               Toggle privacy mode (obscure paths and titles)
     g/G             Jump to top/bottom
     PgUp/PgDn       Page scroll
     q, Esc          Quit

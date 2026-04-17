@@ -2,6 +2,7 @@ pub struct AppState {
     pub show_bars: bool,
     pub scroll_offset: usize,
     pub selected_turn: usize,
+    pub privacy_mode: bool,
 }
 use crate::usage::analyzers::{format_currency, format_duration, format_number, format_percentage};
 use crate::usage::models::{ModelRates, SessionAnalysis};
@@ -57,6 +58,7 @@ pub fn render_session_analysis_with_bars(
             show_bars,
             scroll_offset: 0,
             selected_turn: 0,
+            privacy_mode: false,
         },
     );
 }
@@ -79,19 +81,25 @@ pub fn render_session_analysis_with_state(
         ])
         .split(area);
 
-    render_title(f, analysis, main_layout[0]);
+    render_title(f, analysis, main_layout[0], app_state);
     render_stats_grid(f, analysis, main_layout[1]);
     render_timeline_with_state(f, analysis, main_layout[2], app_state);
     render_help_bar_with_state(f, app_state, main_layout[3]);
 }
 
 /// Render the title section with session ID and metadata
-fn render_title(f: &mut Frame, analysis: &SessionAnalysis, area: Rect) {
-    let title_text = format!("Claude Code Session Usage - {}", analysis.session_id.0);
+fn render_title(f: &mut Frame, analysis: &SessionAnalysis, area: Rect, app_state: &AppState) {
+    let session_id_disp = crate::ui::obfuscate(&analysis.session_id.0, app_state.privacy_mode);
+    let title_text = format!("Claude Code Session Usage - {}", session_id_disp);
     let project_info = analysis
         .project
         .as_ref()
-        .map(|p| format!("Project: {}", p))
+        .map(|p| {
+            format!(
+                "Project: {}",
+                crate::ui::obfuscate(p, app_state.privacy_mode)
+            )
+        })
         .unwrap_or_else(|| "Project: unknown".to_string());
 
     let block = Block::default()
@@ -286,6 +294,7 @@ fn render_timeline_with_bars(
             show_bars,
             scroll_offset: 0,
             selected_turn: 0,
+            privacy_mode: false,
         },
     );
 }

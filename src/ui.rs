@@ -175,21 +175,23 @@ fn draw_session_list(f: &mut Frame, area: Rect, app: &App) {
 
         // Project name
         let pname: String = s.project_name.chars().take(28).collect();
-        let project_spans = if !query.is_empty() && pname.to_lowercase().contains(&query) {
-            highlight_match(&format!("{:<28}", pname), &query, CYAN, bg)
-        } else {
-            vec![Span::styled(
-                format!("{:<28}", pname),
-                Style::default()
-                    .fg(CYAN)
-                    .bg(bg)
-                    .add_modifier(if s.is_alive {
-                        Modifier::BOLD
-                    } else {
-                        Modifier::empty()
-                    }),
-            )]
-        };
+        let pname_disp = obfuscate(&pname, app.privacy_mode);
+        let project_spans =
+            if !query.is_empty() && pname.to_lowercase().contains(&query) && !app.privacy_mode {
+                highlight_match(&format!("{:<28}", pname), &query, CYAN, bg)
+            } else {
+                vec![Span::styled(
+                    format!("{:<28}", pname_disp),
+                    Style::default()
+                        .fg(CYAN)
+                        .bg(bg)
+                        .add_modifier(if s.is_alive {
+                            Modifier::BOLD
+                        } else {
+                            Modifier::empty()
+                        }),
+                )]
+            };
 
         // Message count
         let count = Span::styled(
@@ -235,17 +237,21 @@ fn draw_session_list(f: &mut Frame, area: Rect, app: &App) {
         } else {
             Color::Rgb(160, 160, 170)
         };
-        let prompt_spans = if !query.is_empty() && prompt_oneline.to_lowercase().contains(&query) {
+        let prompt_oneline_disp = obfuscate(&prompt_oneline, app.privacy_mode);
+        let prompt_spans = if !query.is_empty()
+            && prompt_oneline.to_lowercase().contains(&query)
+            && !app.privacy_mode
+        {
             highlight_match(&prompt_oneline, &query, prompt_fg, bg)
         } else {
             vec![Span::styled(
-                prompt_oneline.clone(),
+                prompt_oneline_disp,
                 Style::default().fg(prompt_fg).bg(bg),
             )]
         };
 
         // Pad
-        let content_len: usize = used + prompt_oneline.len();
+        let content_len: usize = used + prompt_oneline.chars().count();
         let pad_len = (inner.width as usize).saturating_sub(content_len);
         let pad = Span::styled(" ".repeat(pad_len), Style::default().bg(bg));
 
@@ -303,7 +309,10 @@ fn draw_detail_panel(f: &mut Frame, area: Rect, app: &App) {
     let value = Style::default().fg(Color::White);
     let dim_val = Style::default().fg(Color::Rgb(160, 160, 170));
 
-    let id_short = if s.id.len() > 8 { &s.id[..8] } else { &s.id };
+    let id_short = obfuscate(
+        if s.id.len() > 8 { &s.id[..8] } else { &s.id },
+        app.privacy_mode,
+    );
     let status_span = if s.is_alive {
         Span::styled(
             "ALIVE",
@@ -321,6 +330,10 @@ fn draw_detail_panel(f: &mut Frame, area: Rect, app: &App) {
     let last = s.last_prompt.as_deref().unwrap_or("—");
     let last_oneline: &str = last.split('\n').next().unwrap_or(last);
 
+    let cwd_disp = obfuscate(&trunc(&s.cwd, max_w.saturating_sub(30)), app.privacy_mode);
+    let first_disp = obfuscate(&trunc(first_oneline, max_w), app.privacy_mode);
+    let last_disp = obfuscate(&trunc(last_oneline, max_w), app.privacy_mode);
+
     let lines = vec![
         Line::from(vec![
             Span::styled("  ID ", label),
@@ -329,19 +342,19 @@ fn draw_detail_panel(f: &mut Frame, area: Rect, app: &App) {
             status_span,
             Span::styled("    ", Style::default()),
             Span::styled("Path ", label),
-            Span::styled(trunc(&s.cwd, max_w.saturating_sub(30)), dim_val),
+            Span::styled(cwd_disp, dim_val),
         ]),
         Line::from(vec![
             Span::styled("  ⮩  ", label),
             Span::styled(
-                format!("\"{}\"", trunc(first_oneline, max_w)),
+                format!("\"{}\"", first_disp),
                 Style::default().fg(Color::Rgb(200, 200, 210)),
             ),
         ]),
         Line::from(vec![
             Span::styled("  ⮨  ", label),
             Span::styled(
-                format!("\"{}\"", trunc(last_oneline, max_w)),
+                format!("\"{}\"", last_disp),
                 Style::default().fg(Color::Rgb(200, 200, 210)),
             ),
         ]),
@@ -434,6 +447,8 @@ fn draw_status_bar(f: &mut Frame, area: Rect, app: &App) {
                 desc("here"),
                 key("p"),
                 desc("preview"),
+                key("x"),
+                desc("privacy"),
                 key("u"),
                 desc("usage"),
                 key("/"),
@@ -495,10 +510,12 @@ fn draw_preview_overlay(f: &mut Frame, app: &App) {
     f.render_widget(Clear, overlay);
 
     let status = if session.is_alive { "●" } else { "◌" };
+    let project_name_disp = obfuscate(&session.project_name, app.privacy_mode);
+    let id_disp = obfuscate(&session.id[..8.min(session.id.len())], app.privacy_mode);
     let title = format!(
         " {status} {} · {} · {} prompts ",
-        session.project_name,
-        &session.id[..8.min(session.id.len())],
+        project_name_disp,
+        id_disp,
         session.all_prompts.len()
     );
 
@@ -554,7 +571,8 @@ fn draw_preview_overlay(f: &mut Frame, app: &App) {
         for text_line in prompt.lines() {
             // Word-wrap each line
             for chunk in wrap_text(text_line, wrap_width) {
-                if !query.is_empty() && chunk.to_lowercase().contains(&query) {
+                let chunk_disp = obfuscate(&chunk, app.privacy_mode);
+                if !query.is_empty() && chunk.to_lowercase().contains(&query) && !app.privacy_mode {
                     let mut spans = vec![Span::styled("    ", Style::default().bg(PREVIEW_BG))];
                     spans.extend(highlight_match(
                         &chunk,
@@ -565,7 +583,7 @@ fn draw_preview_overlay(f: &mut Frame, app: &App) {
                     lines.push(Line::from(spans));
                 } else {
                     lines.push(Line::from(Span::styled(
-                        format!("    {chunk}"),
+                        format!("    {chunk_disp}"),
                         Style::default()
                             .fg(Color::Rgb(200, 200, 210))
                             .bg(PREVIEW_BG),
@@ -657,10 +675,12 @@ fn wrap_text(text: &str, max_width: usize) -> Vec<String> {
 }
 
 fn trunc(text: &str, max: usize) -> String {
-    if text.len() <= max {
+    let char_count = text.chars().count();
+    if char_count <= max {
         text.to_string()
     } else {
-        format!("{}…", &text[..max.saturating_sub(1)])
+        let truncated: String = text.chars().take(max.saturating_sub(1)).collect();
+        format!("{}…", truncated)
     }
 }
 
@@ -670,4 +690,24 @@ fn format_size(bytes: u64) -> String {
     } else {
         format!("{}KB", bytes / 1024)
     }
+}
+
+pub fn obfuscate(text: &str, enabled: bool) -> String {
+    if !enabled {
+        return text.to_string();
+    }
+    text.chars()
+        .map(|c| {
+            if c.is_alphanumeric() {
+                // simple deterministic "pixelation" using ascii blocks
+                match (c as u32) % 3 {
+                    0 => '▓',
+                    1 => '▒',
+                    _ => '░',
+                }
+            } else {
+                c
+            }
+        })
+        .collect()
 }
