@@ -3,6 +3,7 @@ pub struct AppState {
     pub scroll_offset: usize,
     pub selected_turn: usize,
     pub privacy_mode: bool,
+    pub detailed_view: bool,
 }
 use crate::usage::analyzers::{format_currency, format_duration, format_number, format_percentage};
 use crate::usage::models::{ModelRates, SessionAnalysis};
@@ -59,6 +60,7 @@ pub fn render_session_analysis_with_bars(
             scroll_offset: 0,
             selected_turn: 0,
             privacy_mode: false,
+            detailed_view: false,
         },
     );
 }
@@ -75,7 +77,7 @@ pub fn render_session_analysis_with_state(
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),  // Title
-            Constraint::Length(12), // Stats grid (2 rows of 6 each)
+            Constraint::Length(14), // Stats grid (was 12)
             Constraint::Min(10),    // Timeline
             Constraint::Length(1),  // Help bar
         ])
@@ -90,7 +92,20 @@ pub fn render_session_analysis_with_state(
 /// Render the title section with session ID and metadata
 fn render_title(f: &mut Frame, analysis: &SessionAnalysis, area: Rect, app_state: &AppState) {
     let session_id_disp = crate::ui::obfuscate(&analysis.session_id.0, app_state.privacy_mode);
-    let title_text = format!("Claude Code Session Usage - {}", session_id_disp);
+
+    let time_range =
+        if let (Some(first), Some(last)) = (analysis.turns.first(), analysis.turns.last()) {
+            format!(
+                "{} to {}",
+                first.timestamp.format("%Y-%m-%d %H:%M:%S"),
+                last.timestamp.format("%H:%M:%S")
+            )
+        } else {
+            "Unknown time".to_string()
+        };
+
+    let title_text = format!(" Session: {} | {} ", session_id_disp, time_range);
+
     let project_info = analysis
         .project
         .as_ref()
@@ -137,10 +152,13 @@ fn render_title(f: &mut Frame, analysis: &SessionAnalysis, area: Rect, app_state
 
 /// Render the stats grid with 9 stat cards
 fn render_stats_grid(f: &mut Frame, analysis: &SessionAnalysis, area: Rect) {
-    // Use a more compact approach - split into 6 smaller cards
     let grid = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Length(5), Constraint::Length(5)])
+        .constraints([
+            Constraint::Length(5),
+            Constraint::Length(5),
+            Constraint::Length(4), // Token breakdown
+        ])
         .split(area);
 
     let top_row = Layout::default()
@@ -241,6 +259,56 @@ fn render_stats_grid(f: &mut Frame, analysis: &SessionAnalysis, area: Rect) {
         bottom_row[3],
         COLORS.output,
     );
+
+    render_token_breakdown_card(f, analysis, grid[2]);
+}
+
+fn render_token_breakdown_card(f: &mut Frame, analysis: &SessionAnalysis, area: Rect) {
+    let block = Block::default()
+        .title(" Token Breakdown ")
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::DarkGray));
+
+    let agg = &analysis.aggregates;
+    let total = agg.total() as f64;
+
+    if total == 0.0 {
+        f.render_widget(Paragraph::new(" No tokens used ").block(block), area);
+        return;
+    }
+
+    let make_span = |label: &str, count: u64, color: Color| {
+        let pct = (count as f64 / total) * 100.0;
+        vec![
+            Span::styled(format!(" {} ", label), Style::default().fg(Color::Gray)),
+            Span::styled(
+                format!("{} ({:.1}%)", format_number(count), pct),
+                Style::default().fg(color).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" │", Style::default().fg(Color::DarkGray)),
+        ]
+    };
+
+    let mut spans = Vec::new();
+    spans.extend(make_span("Input", agg.input, COLORS.input));
+    spans.extend(make_span(
+        "Cache Write",
+        agg.cache_creation,
+        COLORS.cache_write,
+    ));
+    spans.extend(make_span("Cache Read", agg.cache_read, COLORS.cache_read));
+    spans.extend(make_span("Output", agg.output, COLORS.output));
+
+    // remove last separator
+    if spans.last().map(|s| s.content.as_ref()) == Some(" │") {
+        spans.pop();
+    }
+
+    let paragraph = Paragraph::new(Line::from(spans))
+        .block(block)
+        .alignment(Alignment::Center);
+
+    f.render_widget(paragraph, area);
 }
 
 /// Render a single stat card
@@ -295,6 +363,7 @@ fn render_timeline_with_bars(
             scroll_offset: 0,
             selected_turn: 0,
             privacy_mode: false,
+            detailed_view: false,
         },
     );
 }
@@ -835,7 +904,24 @@ fn get_session_marker(session_idx: usize) -> String {
     }
 }
 
-/// Get session color for visual distinction
+fn format_time_delta(duration: chrono::Duration) -> (String, Color) {
+    let secs = duration.num_seconds();
+    if secs < 60 {
+        (format!("+{}s", secs), Color::DarkGray)
+    } else if secs < 3600 {
+        let mins = secs / 60;
+        let color = if mins >= 5 {
+            Color::Yellow
+        } else {
+            Color::DarkGray
+        };
+        (format!("+{}m", mins), color)
+    } else {
+        let hours = secs / 3600;
+        let mins = (secs % 3600) / 60;
+        (format!("+{}h{}m", hours, mins), Color::Red)
+    }
+}
 fn get_session_color(session_idx: usize) -> Color {
     let colors = [
         Color::Rgb(46, 204, 113), // Green
@@ -940,7 +1026,15 @@ fn render_turns_with_navigation(
             let session_marker = session_idx.map(get_session_marker).unwrap_or_default();
             let session_color = session_idx.map(get_session_color).unwrap_or(Color::Gray);
 
-            let time_str = turn.timestamp.format("%H:%M").to_string();
+            let time_cell = if app_state.detailed_view && idx > 0 {
+                let prev_turn = &analysis.turns[idx - 1];
+                let delta = turn.timestamp.signed_duration_since(prev_turn.timestamp);
+                let (delta_str, color) = format_time_delta(delta);
+                Cell::from(Span::styled(delta_str, Style::default().fg(color)))
+            } else {
+                Cell::from(turn.timestamp.format("%H:%M").to_string())
+            };
+
             let model_str = turn
                 .model
                 .as_ref()
@@ -993,7 +1087,7 @@ fn render_turns_with_navigation(
                         .fg(session_color)
                         .add_modifier(Modifier::BOLD),
                 )),
-                Cell::from(time_str),
+                time_cell,
                 Cell::from(model_str),
                 Cell::from(format_number(turn.input)),
                 Cell::from(format_number(turn.output)),
@@ -1086,7 +1180,15 @@ fn render_turns_with_bars_and_navigation(
             let session_marker = session_idx.map(get_session_marker).unwrap_or_default();
             let session_color = session_idx.map(get_session_color).unwrap_or(Color::Gray);
 
-            let time_str = turn.timestamp.format("%H:%M").to_string();
+            let time_cell = if app_state.detailed_view && idx > 0 {
+                let prev_turn = &analysis.turns[idx - 1];
+                let delta = turn.timestamp.signed_duration_since(prev_turn.timestamp);
+                let (delta_str, color) = format_time_delta(delta);
+                Cell::from(Span::styled(delta_str, Style::default().fg(color)))
+            } else {
+                Cell::from(turn.timestamp.format("%H:%M").to_string())
+            };
+
             let model_str = turn
                 .model
                 .as_ref()
@@ -1174,7 +1276,7 @@ fn render_turns_with_bars_and_navigation(
                         .fg(session_color)
                         .add_modifier(Modifier::BOLD),
                 )),
-                Cell::from(time_str),
+                time_cell,
                 Cell::from(model_str),
                 Cell::from(format!("{} {}", format_number(turn.input), input_bar)),
                 Cell::from(format!("{} {}", format_number(turn.output), output_bar)),
@@ -1230,8 +1332,8 @@ fn render_help_bar_with_state(f: &mut Frame, app_state: &AppState, area: Rect) {
     );
 
     let help_text = format!(
-        "[q]uit | [b]ars: {} | [↑↓] nav | [PgUp/PgDn] page | [n/N] next/prev session{}",
-        bars_status, turn_info
+        "[q]uit | [v]iew detailed: {} | [b]ars: {} | [↑↓] nav | [PgUp/PgDn] page | [n/N] next/prev session{}",
+        if app_state.detailed_view { "ON" } else { "OFF" }, bars_status, turn_info
     );
 
     let text = Paragraph::new(help_text)
@@ -1239,6 +1341,89 @@ fn render_help_bar_with_state(f: &mut Frame, app_state: &AppState, area: Rect) {
         .alignment(Alignment::Center);
 
     f.render_widget(text, area);
+}
+
+fn build_stacked_bars(
+    turns: &[crate::usage::models::TurnSummary],
+    max_tokens: u64,
+    area: Rect,
+) -> Paragraph<'static> {
+    let height = area.height.saturating_sub(1) as usize; // Account for bottom border
+    let width = area.width as usize;
+    if height == 0 || width == 0 {
+        return Paragraph::new("");
+    }
+
+    let mut grid: Vec<Vec<Span>> = vec![vec![Span::raw(" "); width]; height];
+
+    for (x, t) in turns.iter().enumerate().take(width) {
+        let total = t.total_tokens as f64;
+        if total == 0.0 {
+            continue;
+        }
+
+        let h_total = ((total / max_tokens as f64) * height as f64).ceil() as usize;
+        let h_total = h_total.min(height).max(1);
+
+        let cr = t.cache_read as f64;
+        let cw = t.cache_creation as f64;
+        let input = t.input as f64;
+        let output = t.output as f64;
+
+        let mut h_cr = (cr / total * h_total as f64).round() as usize;
+        let mut h_cw = (cw / total * h_total as f64).round() as usize;
+        let mut h_in = (input / total * h_total as f64).round() as usize;
+        let mut h_out = (output / total * h_total as f64).round() as usize;
+
+        let mut sum = h_cr + h_cw + h_in + h_out;
+        while sum > h_total {
+            if h_cr > 0 {
+                h_cr -= 1;
+            } else if h_in > 0 {
+                h_in -= 1;
+            } else if h_cw > 0 {
+                h_cw -= 1;
+            } else if h_out > 0 {
+                h_out -= 1;
+            }
+            sum -= 1;
+        }
+        while sum < h_total && sum > 0 {
+            if cr > 0.0 {
+                h_cr += 1;
+            } else if input > 0.0 {
+                h_in += 1;
+            } else if cw > 0.0 {
+                h_cw += 1;
+            } else if output > 0.0 {
+                h_out += 1;
+            }
+            sum += 1;
+        }
+
+        let mut current_h = 0;
+        let mut fill = |count: usize, color: Color| {
+            for _ in 0..count {
+                if current_h < height {
+                    let y = height - 1 - current_h;
+                    grid[y][x] = Span::styled("█", Style::default().fg(color));
+                    current_h += 1;
+                }
+            }
+        };
+
+        fill(h_cr, COLORS.cache_read);
+        fill(h_cw, COLORS.cache_write);
+        fill(h_in, COLORS.input);
+        fill(h_out, COLORS.output);
+    }
+
+    let lines: Vec<Line> = grid.into_iter().map(Line::from).collect();
+    Paragraph::new(lines).block(
+        Block::default()
+            .borders(Borders::BOTTOM)
+            .border_style(Style::default().fg(Color::DarkGray)),
+    )
 }
 
 fn render_graphical_timeline(
@@ -1353,7 +1538,13 @@ fn render_graphical_timeline(
 
     let ribbon_para = Paragraph::new(Line::from(ribbon_spans));
 
-    f.render_widget(tokens_sparkline, v_layout[0]);
+    if app_state.detailed_view {
+        let stacked_bars = build_stacked_bars(visible_turns, max_tokens, v_layout[0]);
+        f.render_widget(stacked_bars, v_layout[0]);
+    } else {
+        f.render_widget(tokens_sparkline, v_layout[0]);
+    }
+
     f.render_widget(cost_sparkline, v_layout[1]);
     f.render_widget(ribbon_para, v_layout[2]);
 
@@ -1368,7 +1559,11 @@ fn render_graphical_timeline(
         .split(label_area);
 
     let token_label = Paragraph::new(format!(" T:{}", format_number(max_tokens)))
-        .style(Style::default().fg(Color::Gray))
+        .style(Style::default().fg(if app_state.detailed_view {
+            Color::White
+        } else {
+            Color::Gray
+        }))
         .block(
             Block::default()
                 .borders(Borders::BOTTOM)

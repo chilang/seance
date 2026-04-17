@@ -51,6 +51,7 @@ pub mod app {
                     scroll_offset: 0,
                     selected_turn: 0,
                     privacy_mode: false,
+                    detailed_view: false,
                 },
                 privacy_mode: false,
                 filter_dirty: true,
@@ -296,6 +297,9 @@ fn run_app(
                     }
                     KeyCode::Char('b') => {
                         app.usage_ui_state.show_bars = !app.usage_ui_state.show_bars;
+                    }
+                    KeyCode::Char('d') | KeyCode::Char('t') | KeyCode::Char('v') => {
+                        app.usage_ui_state.detailed_view = !app.usage_ui_state.detailed_view;
                     }
                     KeyCode::Up | KeyCode::Char('k') => {
                         if app.usage_ui_state.selected_turn > 0 {
